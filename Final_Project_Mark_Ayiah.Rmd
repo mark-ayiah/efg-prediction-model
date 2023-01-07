@@ -1,0 +1,297 @@
+---
+title: "S&DS 230 Final Project: Predicting Effective Field Goal Percentage (eFG%) in the NBA"
+author: "Mark Ayiah"
+date: "August 7, 2022"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Useful libraries
+source("http://www.reuningscherer.net/s&ds230/Rfuncs/regJDRS.txt")
+library(car)
+library(leaps)
+library(lubridate)
+library(rvest)
+library(corrplot)
+```
+
+## Part I: Introduction
+As the NBA has evolved, statistics have become an increasingly important part of how players, staff, and fans understand the game. The introduction of advanced statistics, detailed play-by-play tracking, and entire team departments dedicated to data analysis points towards the notion that analyzing the game from a statistical lens is an effective way to reach more basketball success. With this project, my aim is to participate in the basketball community's statistical discourse, and more specifically, to examine a particular statistic: effective field goal percentage (eFG%). My goal is to investigate the relationships between eFG% and various other metrics in order to eventually create a model that can accurately predict a player's eFG% based on how they perform in other facets of the game.
+
+## Part II: Data Collection | Web Scraping
+I sought to use data from the most recent, complete NBA cycle, so I used Basketball Reference's catalog of statistics from 2021-22 NBA season. The link to the site is [here](https://www.basketball-reference.com/leagues/NBA_2022_per_game.html). The data contains over 20 different categories of player statistics from over 500 unique NBA players. The statistics are calculated on a per game scale, with a complete player season being at most 82 games. To access this data in R, I had to manually scrape the values from the website, parse through the html encoding, and create a data frame/table of the values. Here is how I accomplished this:
+
+*(All data and statistical descriptions are courtesy of [Basketball Reference](https://www.basketball-reference.com/))*
+
+```{r}
+# Data Scraping
+nbaURL <- "https://www.basketball-reference.com/leagues/NBA_2022_per_game.html"
+nbaWebpage <- read_html(nbaURL)
+nbaHTML <- html_nodes(nbaWebpage, "td")
+nbaData <- html_text(nbaHTML)
+nbaColNamesHTML <- html_nodes(nbaWebpage, ".center+ .poptip , .center+ .poptip")
+nbaColNames <- html_text(nbaColNamesHTML)
+
+# Data Frame Creation
+nba <- data.frame(matrix(ncol = 29, nrow = 0))
+colnames(nba) <- nbaColNames
+
+
+# Creates a row with each player's information and adds it to the overall nba data frame
+playerIndex <- 1
+for (i in 1:605) {
+  playerRow <- nbaData[playerIndex:(playerIndex+28)]
+  nba[(i), ] <- playerRow
+  playerIndex <- playerIndex + 29
+}
+```
+
+For the remainder of this paper, I will only be using a select few of the variables from the original data set. They are listed here along with their descriptions:
+
+* Pos = Position
+* Age = Player's age on February 1 of the season
+* FG% = Field Goal Percentage
+* eFG% = Effective Field Goal Percentage
+  + This statistic adjusts for the fact that a 3-point field goal is worth one more point than a 2-point field goal.
+* FT% = Free Throw Percentage
+* TRB = Total Rebounds Per Game
+* AST = Assists Per Game
+* STL = Steals Per Game
+* BLK = Blocks Per Game
+* PTS = Points Per Game
+
+Here is a glimpse at what the raw data looks like:
+
+```{r, echo = FALSE}
+knitr::kable(nba[1:6,1:10], format="simple")
+```
+
+## Part III: Data Cleaning
+There was a bit of work to do to make the data suitable for use. The most immediate issue was that all of the data was loaded in as strings/characters as opposed to numbers (i.e the computer was registering values like Precious Achiuwa's field goal percentage as the string ".439" instead of the numeric value .439). Thus, I corrected the data types for each column. Here is an example of how I accomplished this:
+
+```{r}
+# Specifying the columns that I wanted to change to numeric values
+numeric <- c(7:29)
+
+# Loop that iterates through the specified columns and changes their data type to numeric
+for (i in numeric) {
+  nba[, i] <- as.numeric(nba[, i])
+}
+```
+
+```{r, include = FALSE}
+integers <- c(3, 5, 6)
+for (i in integers) {
+  nba[, i] <- as.integer(nba[, i])
+}
+```
+
+Next, I noticed that for players who were traded or signed to different teams during the season, the table had multiple rows of data for their statistics with each team that they played for and their total season averages. To avoid having to deal with these duplicate players, I decided to only use players who played at least 50 games for one team during the season. Thus, the frame of reference for the data would only include players who regularly made the rotation for their team. This was done with this line of code:
+
+```{r}
+nba <- nba[nba$G >= 50 & !(nba$Tm %in% "TOT"), ]
+```
+
+Finally, I decided to categorize the Age and Position variables. I put players in age groups of 4 year intervals (Ages 18-22, 23-27, 28-32, 33-37, and 38+) so that I could later see how these age groups relate to eFG%. I also put their positions in play style groups. Point guards, shooting guards, and small forwards tend to shoot further from the basket in comparison to power forwards and centers, so I split them into groups of guards/wings (guards & small forwards) and bigs (power forwards and centers) to later see if position was relevant when discussing eFG%. Finally, I narrowed down the data to only include the relevant metrics to be used throughout the rest of this paper. Here is what the data looks like now:
+
+*NOTE: The column names "eFG%", "FT%", and "FG%" were changed to "eFGpct" and "FTpct", and "FGpct" for compatibility reasons.*
+
+```{r, include = FALSE}
+# Turning the Age variable into a range & factor
+ageRanges <- rep(NA, 202)
+for (i in 1:202) {
+  if (nba$Age[i] %in% c(18:22)) {
+    ageRanges[i] <- "18-22"
+  } else if (nba$Age[i] %in% c(23:27)) {
+    ageRanges[i] <- "23-27"
+  } else if (nba$Age[i] %in% c(28:32)) {
+    ageRanges[i] <- "28-32"
+  } else if (nba$Age[i] %in% c(33:37)) {
+    ageRanges[i] <- "33-37"
+  } else {
+    ageRanges[i] <- "38+"
+  }
+}
+nba$Age <- as.factor(ageRanges)
+
+# Making the Position varaible a factor
+positions <- rep(NA, 202)
+for (i in 1:202) {
+  if (nba$Pos[i] %in% c("PG", "SG", "SF")) {
+    positions[i] <- "Guard/Wing"
+  } else {
+    positions[i] <- "Big"
+  }
+}
+nba$Pos <- as.factor(positions)
+
+# Changing the name of 'eFG%' to 'eFGpct' and 'FT%' to 'FTpct'
+colnames(nba)[10] <- "FGpct"
+colnames(nba)[17] <- "eFGpct"
+colnames(nba)[20] <- "FTpct"
+
+# Choosing only the relevant columns and changing row names
+rownames(nba) <- nba$Player
+nba <- nba[, c("FGpct", "eFGpct", "Pos", "Age", "FTpct", "TRB", "AST", "STL", "BLK", "PTS")]
+
+
+# Attaching the names to save typing
+attach(nba)
+```
+
+```{r, echo = FALSE}
+knitr::kable(nba[1:6,1:10], format="simple")
+```
+
+
+## Part IV: Basic Testing
+
+### A: Finding Correlations
+Now that the data has been cleaned and is ready to use, we can first do some basic analysis to get a better feel for the data set. Finding the correlation between each continuous variable is helpful because it gives us a glimpse at what predictors may end up being significant down the road when trying to fit a regression model to predict the response variable, eFG%. The correlations with eFG% are as follows:
+
+```{r, echo = FALSE}
+(correlations <- cor(eFGpct, nba[, c("FTpct", "TRB", "AST", "STL", "BLK", "PTS")]))
+```
+
+Blocks per game had the strongest correlation with eFG% out of the selected predictors. Here is a scatterplot to better visualize the relationship:
+
+```{r, fig.width = 6.5, echo = FALSE}
+plot(eFGpct, BLK, col = "maroon", pch = 19, ylab = "Blocks per game", xlab = "Effective FG%", main = "Effective FG% vs. Blocks per game")
+mtext(paste("Sample Correlation =", round(correlations[5], 3)), cex = .9)
+```
+
+As shown by both the correlation value and the scatterplot, there is a positive, moderate, linear relationship between a player's eFG% and their blocks per game.
+
+
+### B: T-Testing
+Next, we can test to see if a player's position had any measurable relationship with their eFG%. With regular field goal percentage, taller players (mostly forwards and centers) tend to shoot higher percentages because more of their looks come closer to the basket and thus are less likely to miss. A quick one-sided 2 Sample T-Test confirms this:
+
+```{r, echo = FALSE}
+(test1 <- t.test(FGpct ~ Pos, alternative = "greater"))
+```
+
+In this case, the null hypothesis is that the mean difference in FG% between the positional groups is less than or equal to zero, and the alternative hypothesis is that the mean FG% for bigs is greater than the mean FG% for guards/wings. Since the p-value very closely approaches 0 and is statistically significant at the .05 significance level, we reject the null hypothesis and conclude that, on average, bigs shoot higher FG% than guards & wings. 
+
+However, effective field goal percentage is meant to account for the fact that three-pointers are worth more (and are harder to make). First, we can look at a boxplot to see how the two distributions stack up against each other.
+
+```{r, echo = FALSE}
+boxplot(eFGpct ~ Pos, col = c("royalblue3", "firebrick2"), main = "Effective Field Goal Percentage by Position", ylab = "eFG%", xlab = "Position")
+```
+
+The boxplot showcases a clear difference between the groups' distributions. On average, it would appear that bigs shoot higher effective field goal percentages. However, we can do another T-Test to see if there is as much of a difference as we observed with regular FG% (or any difference at all) and its statistical significance:
+
+```{r, echo = FALSE}
+(test2 <- t.test(eFGpct ~ Pos, alternative = "greater"))
+paste("Difference in mean FG% between groups:", (test1$estimate[1] - test1$estimate[2]))
+paste("Difference in mean eFG% between groups:", (test2$estimate[1] - test2$estimate[2]))
+```
+
+```{r, include = FALSE}
+test3 <- t.test(eFGpct ~ Pos)$conf.int
+```
+
+Here, we also get a p-value that very closely approaches 0 and is statistically significant at the .05 significance level. Thus, we can conclude that there is a statistically significant difference in the mean eFG% between guards/wings and bigs and that, on average, bigs shoot at a higher clip. This may also indicate that more advanced metrics such as true shooting percentage (which adjusts for three-pointers and free throws) may be more appropriate to comprehensively assess a player's shooting efficiency. However, the difference in mean eFG% between positional groups was not as large as the mean FG% between positional groups, which indicates that eFG% could be a better measure of efficiency than standard FG%.
+
+
+### C: Bootstrapping
+We can also use bootstrapping to better visualize the true difference in the means of eFG% between groups of positions. Bootstrapping essentially treats the data as overall population data and creates a sampling distribution of means based on samples from data. Then, based on the sampling distribution (which turns out to be normally distributed), we can create confidence intervals for the true population difference of means. The results of our bootstrap are as follows:
+
+```{r, include = FALSE}
+repetitions <- 10000
+diffEFG <- rep(NA, repetitions)
+
+for (i in 1:repetitions) {
+  sGW <- sample(eFGpct[Pos == "Guard/Wing"], length(eFGpct[Pos == "Guard/Wing"]), replace = T)
+  sB <- sample(eFGpct[Pos == "Big"], length(eFGpct[Pos == "Big"]), replace = T)
+  diffEFG[i] <- mean(sB) - mean(sGW)
+}
+```
+
+```{r, fig.width = 7.5, fig.height = 6.5, echo = FALSE}
+ci <- quantile(diffEFG, c(.025, .975))
+hist(diffEFG, col = "blue", main = "Bootstrapped Sample Means Diff in Times", xlab = "Minutes", breaks = 50)
+abline(v = ci, lwd = 3, col = "red")
+abline(v = test3, lwd = 3, col = "green", lty = 2)
+text(ci[1] + 0.001, 300 , paste("Lower Limit:", round(ci[1], 3)), srt = 90, col = "red")
+text(ci[2] - 0.0015, 300 , paste("Upper Limit", round(ci[2], 3)), srt = 90, col = "red")
+legend("topleft", c("T-Test CI","Bootstrapped CI"), lwd = 3, col = c("green","red"), lty = c(2,1))
+```
+
+These results tells us that we are 95% confidence that the true population difference in mean eFG% between guards/wings and bigs is between `r paste(round(ci[1], 3), "%", sep = "")` and `r paste(round(ci[2], 3), "%", sep = "")` according to the bootstrapped test. This interval is a bit more narrow than the confidence interval provided by a two-sided t-test, which is a benefit of the added accuracy of bootstrapping.
+
+
+## Part V: Permutation Testing
+We can also use a permutation test to quantify how likely it is that the difference in the means of eFG% between groups was simply due to chance. Permutation testing repeatedly shuffles the order of the categorical variable (in this case the player's position), creating new pairs of data to find an overall mean from, and then creates a sampling distribution of the mean from each repetition. Then, based on that distribution (which turns out to be normally distributed), we can calculate the probability that we would see a value at least as extreme as the observed value purely due to chance. For this test, the null hypothesis states that there is not sufficient evidence to suggests that the difference in means between the two categorical groups is not due to chance. At a 95% confidence level, if the p-value (probability) is less than .05, we reject the null hypothesis and conclude that the difference in means is statistically significant and not due to chance. The results of our permutation test are as follows:
+
+```{r, fig.width = 7.5, fig.height = 6.5, echo = FALSE}
+actual_diff <- mean(eFGpct[Pos == "Big"]) - mean(eFGpct[Pos == "Guard/Wing"])
+diffvals <- rep(NA, repetitions)
+for (i in 1:repetitions) { 
+  fakePos <- sample(Pos)
+  diffvals[i] <- mean(eFGpct[fakePos == "Big"]) - mean(eFGpct[fakePos == "Guard/Wing"])
+}
+hist(diffvals, xlim = c(-.03, .06), main = "Difference in Means of eFG% between Guards/Wings & Bigs", xlab = "Difference in Means", col = "indianred1")
+abline(v = actual_diff, col = "cornflowerblue", lwd = 3)
+text(actual_diff - 0.0015, 1000 , paste("Actual Difference in Means =", round(actual_diff, 2)), srt = 90)
+paste("p-value:", mean(diffvals >= actual_diff))
+```
+
+The p-value is effectively 0 which is a very strong indication that the observed difference in the means of eFG% between position group was not due to chance.
+
+
+## Part VI: Multiple Regression
+Now, we can fit a model that best predicts eFG% based on a combination of the other statistics in our data set. First, we can look at the distribution of eFG% among players using a normal quantile plot. This plot essentially shows how normally distributed a set of values is; if the values fit reasonably well and make a line, we can assume that the data is normally distributed.
+
+```{r, fig.width = 6.5, echo = FALSE}
+qqPlot(eFGpct, pch = 19, main = "Normal Quantile Plot of eFG%", ylab = "eFG%")
+```
+
+As we can see, eFG% is approximately normally distributed; although it is not a requirement that the response variable is normally distributed for this analysis, it is a good sign that we may be able to avoid issues like heteroskedasticity (when the variances of the errors are unequal) or otherwise problematic occurences going forward.
+
+Next, we can analyze the pairwise relationships between our continuous predictors using correlation charts.
+
+```{r, fig.width = 7.5, fig.height = 7}
+# Creates a data frame with only the continous predictors
+nbaCont <- nba[, c("eFGpct", "FTpct", "TRB", "AST", "STL", "BLK", "PTS")]
+
+# Finds the pairwise correlations of the continuous predictors
+sigcorr <- cor.mtest(nbaCont)
+
+# Plots the correlations 
+corrplot.mixed(cor(nbaCont), lower.col = "black", upper = "ellipse", tl.col = "black", number.cex=.7, 
+                tl.pos = "lt", tl.cex=.7, p.mat = sigcorr$p, sig.level = .05, srt = 0)
+```
+
+As depicted, some of the predictors are related to each other. This indicates multicollinearity, which is essentially when predictors have substantial levels of correlation with each other and, in turn, "battle" to explain the variability in the response variable. This is nice to be aware of before doing our regression because it explains why the significance of some predictors may change when others are removed as we work towards the ideal model. 
+
+Now, we can fit a generalized linear model to predict eFG% using ANOVA (Analysis of Variance) and Type III Sum of Squares. This ensures that the significance of each predictor is calculated within the context of all the other terms in the model. The results are as follows:
+
+```{r, echo = FALSE}
+m1 <- lm(eFGpct ~ Pos + Age + FTpct + TRB + AST + STL + BLK + PTS)
+Anova(m1, type = "III")
+```
+
+In the coefficients section, stars by the probability column indicate statistical significance. As shown, some of the variables are not statistically significant predictors of eFG% with this model. To fix this problem, we can do backwards stepwise regression, which essentially involves removing the predictor with the highest p-value one by one until your model only has statistically significant predictors left. The results with only statistically significant predictors are as follows:
+
+```{r, echo = FALSE}
+m2 <- lm(eFGpct ~ Age + TRB + AST)
+Anova(m2, type = "III")
+```
+
+As shown, after backwards stepwise regression we get a model for eFG% as predicted by a player's age, total rebounds per game, and assists per game. Now, we must check the residual plots of the model to ensure that the assumptions for the regression are met. The main assumptions are that the errors/residuals are normally distributed, the variances of the errors are equal across the board, and that there aren't outliers that are heavily affecting the data. Here are the plots:
+
+```{r, fig.width = 6.5, echo = FALSE}
+myResPlots2(m2)
+```
+
+According to these plots, the errors are approximately normally distributed, and the fits vs. studentized residual plot does not indicate that there is heteroskedasticity or that there are enough outliers (values with absolute values of their studentized residuals that are more than 3) to be concerned with. Therefore, we can continue with our analysis and look at more summary statistics of the model.
+
+```{r, echo = FALSE}
+summary(m2)
+```
+
+These summary statistics tell us that the R-squared value for our model is .253. The R-squared value is, in essence, a metric estimating the overall predictive power of a model. The higher the value, the better a model is at predicting the response variable. It can also be interpreted as the percentage of the variance in the response variable that can be explained by the predictors of the model. Thus, in this case, roughly 26% of the variance in eFG% across the league can be explained by a player's age, total rebounds per game, and assists per game. Furthermore, the signs of the coefficients tell us about their individual relationships with eFG%. In this case, each age group along with total rebounds all have positive coefficients which suggests that as a player's age or total rebounding per game increases, their eFG% increases as well. However, assists has a negative coefficient which suggests that the more assists per game a player averages, the worse their eFG% is.
+
+## Part VII: Conclusion
+In this project, I used data from the 2021-22 NBA season to conduct an analysis that focused on the relationships between eFG% and various other statistics in order to ultimately create a model that can predict eFG% based on a series of other metrics. Throughout the experiment, a few intermediate conclusions were drawn as well. Using T-Tests and bootstrapping, I discovered that, on average, there is a statistically significant relationship between eFG% and a player's position. Furthermore, I created a model to predict eFG% based on the statistically significant predictors of player age, total rebounds per game, and assists per game. A more extensive data set with a larger catalog of statistics may be able to provide deeper insight as to what metrics can be used to most accurately predict and quantify a player's offensive efficiency. With that being said, this experiment is a solid building block for further discussion of the significance of statistics in today's basketball culture.
